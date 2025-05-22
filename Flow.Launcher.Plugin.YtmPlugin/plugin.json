@@ -1,0 +1,12 @@
+{
+    "ID": "BC6F22A3C92742BA8BDBAABBC98A2FE5",
+    "ActionKeyword": "ytm",
+    "Name": "YtmPlugin",
+    "Description": "a new plugin for Flow",
+    "Author": "Johannes7k75",
+    "Version": "1.0.0",
+    "Language": "csharp",
+    "Website": "https://github.com/Johannes7k75/Flow.Launcher.Plugin.YtmPlugin",
+    "IcoPath": "icon.png",
+    "ExecuteFileName": "Flow.Launcher.Plugin.YtmPlugin.dll"
+}

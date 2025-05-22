@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net7.0-windows</TargetFramework>
+    <AssemblyName>Flow.Launcher.Plugin.YtmPlugin</AssemblyName>
+    <PackageId>Flow.Launcher.Plugin.YtmPlugin</PackageId>
+    <Authors>Johannes7k75</Authors>
+    <PackageProjectUrl>https://github.com/Johannes7k75/Flow.Launcher.Plugin.YtmPlugin</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Johannes7k75/Flow.Launcher.Plugin.YtmPlugin</RepositoryUrl>
+    <PackageTags>flow-launcher flow-plugin</PackageTags>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+	<AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <BaseOutputPath>C:\Users\Jonas\AppData\Roaming\FlowLauncher\Plugins\YoutubeMusic-1.0.0</BaseOutputPath>
+  </PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+		<OutputPath>$(BaseOutputPath)</OutputPath>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+		<OutputPath>$(BaseOutputPath)</OutputPath>
+		<DebugSymbols>false</DebugSymbols>
+        <DebugType>None</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="plugin.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Flow.Launcher.Plugin" Version="4.4.0" />
+  </ItemGroup>
+
+</Project>

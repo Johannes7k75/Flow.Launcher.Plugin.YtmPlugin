@@ -1,0 +1,2 @@
+dotnet publish Flow.Launcher.Plugin.YtmPlugin -c Release -r win-x64 --no-self-contained
+Compress-Archive -LiteralPath Flow.Launcher.Plugin.YtmPlugin/bin/Release/win-x64/publish -DestinationPath Flow.Launcher.Plugin.YtmPlugin/bin/YtmPlugin.zip -Force
