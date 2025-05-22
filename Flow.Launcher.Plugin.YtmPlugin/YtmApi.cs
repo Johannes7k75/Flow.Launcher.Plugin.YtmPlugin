@@ -10,30 +10,29 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 {
     public class YtmApi
     {
-        private readonly IPublicAPI _api;
-
         private readonly string host;
         private readonly string port;
         private ClientWebSocket webSocket;
         private readonly CancellationTokenSource cts = new CancellationTokenSource();
 
-        public event Action<PlayerState> OnPlayerStateReceived;
+        public event Action<ResolvedPlayerState> OnPlayerStateReceived;
 
-        private PlayerState _latestPlayerState;
+        public event Action<ResolvedSongInfo> OnSongUpdate;
 
-        public YtmApi(IPublicAPI api, string host, string port)
+        private PlayerState? _latestPlayerState;
+
+        public YtmApi(string host, string port)
         {
             this.host = host;
             this.port = port;
             this.webSocket = new ClientWebSocket();
-            _api = api;
         }
 
         public async Task ConnectAsync()
         {
             var uri = new Uri($"ws://{host}:{port}");
             await webSocket.ConnectAsync(uri, CancellationToken.None);
-            _api.LogInfo("YtmPlugin", $"✅ Connected to WebSocket server at {uri}");
+            YtmPlugin._logger.Info($"✅ Connected to WebSocket server at {uri}");
 
             _ = Task.Run(() => ReceiveLoopAsync(cts.Token));
         }
@@ -49,7 +48,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                     var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        _api.LogInfo("YtmPlugin", "⚠️ Server closed the connection.");
+                        YtmPlugin._logger.Info("⚠️ Server closed the connection.");
                         await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", token);
                         break;
                     }
@@ -61,41 +60,72 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                         typeElement.GetString() == "PLAYER_STATE")
                     {
                         var deserializedJson = JsonSerializer.Deserialize<PlayerState>(json);
-                        _api.LogDebug("YtmPlugin", json);
+                        YtmPlugin._logger.Info(json);
                         var state = UpdatePlayerState(deserializedJson);
                         if (state != null)
                         {
                             _latestPlayerState = state;               // ✅ store the latest state
-                            OnPlayerStateReceived?.Invoke(state);     // Raise event
+                            OnPlayerStateReceived?.Invoke(state.ToResolved());     // Raise event with resolved state
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _api.LogException("YtmPlugin", $"❌ Error: {ex.Message}", ex);
+                    YtmPlugin._logger.Exception($"❌ Error: {ex.Message}", ex);
                     break;
                 }
             }
         }
 
-        private PlayerState UpdatePlayerState(PlayerState state)
+        private PlayerState UpdatePlayerState(PlayerState? state)
         {
-            var newState = _latestPlayerState != null ? _latestPlayerState : state;
+            if (state == null)
+                return _latestPlayerState ?? new PlayerState();
+
+            if (_latestPlayerState == null)
+                return state;
+
+            var oldVideoId = _latestPlayerState.song.videoId;
+            var newState = _latestPlayerState;
+
+
             if (state.song != null)
             {
-                newState.song = state.song;
+                if (newState.song == null)
+                    newState.song = new SongInfo();
+
+                // Update fields individually to avoid losing existing data if partial update
+                if (!string.IsNullOrEmpty(state.song.title)) newState.song.title = state.song.title;
+                if (!string.IsNullOrEmpty(state.song.artist)) newState.song.artist = state.song.artist;
+                if (!string.IsNullOrEmpty(state.song.album)) newState.song.album = state.song.album;
+                if (!string.IsNullOrEmpty(state.song.imageSrc)) newState.song.imageSrc = state.song.imageSrc;
+                if (!string.IsNullOrEmpty(state.song.videoId)) newState.song.videoId = state.song.videoId;
+
+                newState.song.isPaused = state.song.isPaused;
+                newState.song.elapsedSeconds = state.song.elapsedSeconds;
+
+                // Keep position synced with song.elapsedSeconds if available
                 newState.position = state.song.elapsedSeconds;
             }
 
-            if (state.isPlaying != null) newState.isPlaying = state.isPlaying;
-            if (state.position != null && state.position != newState.position) newState.position = state.position;
-            if (state.volume != null) newState.volume = state.volume;
-            if (state.repeat != null) newState.repeat = state.repeat;
+            if (state.isPlaying.HasValue) newState.isPlaying = state.isPlaying;
+            if (state.position.HasValue) newState.position = state.position;
+            if (state.volume.HasValue) newState.volume = state.volume;
+            if (state.muted.HasValue) newState.muted = state.muted;
+            if (!string.IsNullOrEmpty(state.repeat)) newState.repeat = state.repeat;
+            if (!string.IsNullOrEmpty(state.type)) newState.type = state.type;
+
+            YtmPlugin._logger.Info($"Old VideoId: {oldVideoId}, New VideoId: {newState.song.videoId}");
+            if (newState.song.videoId != oldVideoId)
+            {
+                YtmPlugin._logger.Info("Song update");
+                OnSongUpdate?.Invoke(newState.ToResolved().song);
+            }
 
             return newState;
         }
 
-        public async Task SendActionAsync(string action, object data = null)
+        public async Task SendActionAsync(string action, object? data = null)
         {
             if (webSocket.State != WebSocketState.Open) return;
 
@@ -114,39 +144,116 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client closing", CancellationToken.None);
         }
 
-        public PlayerState PlaybackContext
+        public ResolvedPlayerState PlaybackContext => _latestPlayerState.ToResolved();
+
+        // Convenience wrapper methods
+        public void ResumePlayback() => _ = SendSingleActionAsync("play");
+        public void PausePlayback() => _ = SendSingleActionAsync("pause");
+        public void Skip() => _ = SendSingleActionAsync("next");
+        public void SkipBack() => _ = SendSingleActionAsync("previous");
+        public void Mute() => _ = SendSingleActionAsync("mute");
+        public void Shuffle() => _ = SendSingleActionAsync("shuffle");
+        public void Repeat() => _ = SendSingleActionAsync("repeat");
+        public void SetVolume(int volumePercent = 0) => _ = SendDataActionAsync("setVolume", volumePercent);
+
+        private async Task SendSingleActionAsync(string action)
         {
-            get
-            {
-                return _latestPlayerState;
-            }
+            if (webSocket.State != WebSocketState.Open) return;
+            var message = JsonSerializer.Serialize(new { type = "ACTION", action });
+            await SendActionAsync(message);
+        }
+
+        private async Task SendDataActionAsync(string action, object data)
+        {
+            if (webSocket.State != WebSocketState.Open) return;
+            var message = JsonSerializer.Serialize(new { type = "ACTION", action, data });
+            await SendActionAsync(message);
+        }
+
+        private async Task SendActionAsync(string message)
+        {
+            var bytes = Encoding.UTF8.GetBytes(message);
+            await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
         }
     }
 
-
-    // Helper types
+    // Nullable model used for deserialization and partial updates
     public class PlayerState
     {
-        public string type { get; set; }
-        public SongInfo song { get; set; }
-        public bool isPlaying { get; set; }
-        public int position { get; set; }
-        public int volume { get; set; }
-        public string repeat { get; set; }
+        [JsonRequired]
+        public string? type { get; set; }
+        public SongInfo? song { get; set; }
+        public bool? isPlaying { get; set; }
+        public bool? muted { get; set; }
+        public int? position { get; set; }
+        public int? volume { get; set; }
+        public string? repeat { get; set; }
     }
 
     public class SongInfo
     {
-        public string title { get; set; }
-        public string artist { get; set; }
-        public string imageSrc { get; set; }
-        public string album { get; set; }
-        public string videoId { get; set; }
+        public string? title { get; set; }
+        public string? artist { get; set; }
+        public string? imageSrc { get; set; }
+        public string? album { get; set; }
+        public string? videoId { get; set; }
 
         [JsonPropertyName("isPaused")]
         public bool isPaused { get; set; }
 
         [JsonPropertyName("elapsedSeconds")]
         public int elapsedSeconds { get; set; }
+    }
+
+    // Non-nullable model for safe consumption
+    public class ResolvedPlayerState
+    {
+        public string type { get; set; } = string.Empty;
+        public ResolvedSongInfo song { get; set; } = new ResolvedSongInfo();
+        public bool isPlaying { get; set; }
+        public bool muted { get; set; }
+        public int position { get; set; }
+        public int volume { get; set; }
+        public string repeat { get; set; } = "none";
+    }
+
+    public class ResolvedSongInfo
+    {
+        public string title { get; set; } = string.Empty;
+        public string artist { get; set; } = string.Empty;
+        public string imageSrc { get; set; } = string.Empty;
+        public string album { get; set; } = string.Empty;
+        public string videoId { get; set; } = string.Empty;
+        public bool isPaused { get; set; }
+        public int elapsedSeconds { get; set; }
+    }
+
+    // Extension method to convert nullable PlayerState to resolved non-nullable
+    public static class PlayerStateExtensions
+    {
+        public static ResolvedPlayerState ToResolved(this PlayerState? state)
+        {
+            state ??= new PlayerState();
+
+            return new ResolvedPlayerState
+            {
+                type = state.type ?? string.Empty,
+                isPlaying = state.isPlaying ?? false,
+                muted = state.muted ?? false,
+                position = state.position ?? 0,
+                volume = state.volume ?? 100,
+                repeat = state.repeat ?? "none",
+                song = new ResolvedSongInfo
+                {
+                    title = state.song?.title ?? string.Empty,
+                    artist = state.song?.artist ?? string.Empty,
+                    album = state.song?.album ?? string.Empty,
+                    imageSrc = state.song?.imageSrc ?? string.Empty,
+                    videoId = state.song?.videoId ?? string.Empty,
+                    isPaused = state.song?.isPaused ?? false,
+                    elapsedSeconds = state.song?.elapsedSeconds ?? 0
+                }
+            };
+        }
     }
 }

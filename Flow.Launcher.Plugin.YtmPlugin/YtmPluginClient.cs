@@ -10,7 +10,6 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 {
     public class YtmPluginClient
     {
-        private readonly IPublicAPI _api;
         private YtmApi _ytmApi;
         private readonly object _lock = new object();
         private int mLastVolume = 10;
@@ -19,49 +18,151 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         private string CacheFolder { get; }
 
-        public YtmPluginClient(IPublicAPI api, string pluginDir = null)
+        public YtmPluginClient(string pluginDir = null)
         {
-            _api = api;
             pluginDirectory = pluginDir ?? Directory.GetCurrentDirectory();
             CacheFolder = Path.Combine(pluginDirectory, "Cache");
 
             if (!Directory.Exists(CacheFolder)) Directory.CreateDirectory(CacheFolder);
         }
 
+
+        public void AddOnSongUpdate(Action<ResolvedSongInfo> cb)
+        {
+            _ytmApi.OnSongUpdate += cb;
+        }
+
+
         public bool IsConnected => PlaybackContext != null;
+
+        public bool MuteStatus
+        {
+            get { return PlaybackContext?.muted ?? false; }
+        }
+
+        public enum RepeatState
+        {
+            None,
+            One,
+            All,
+        }
+
+        public RepeatState RepeatStatus
+        {
+            get
+            {
+                return PlaybackContext.repeat switch
+                {
+                    "NONE" => RepeatState.None,
+                    "ONE" => RepeatState.One,
+                    "ALL" => RepeatState.All,
+                    _ => throw new ArgumentOutOfRangeException()
+                };
+            }
+        }
+
+        public int CurrentVolume
+        {
+            get { return (int)PlaybackContext.volume; }
+        }
+
+        public string CurrentPlaybackName
+        {
+            get { return PlaybackContext.song.title != null ? PlaybackContext.song.title : "Unknown"; }
+        }
+
+        public ResolvedPlayerState PlaybackContext
+        {
+            get { return _ytmApi.PlaybackContext; }
+        }
+
+        public RepeatState GetNextRepeatAction(RepeatState currentStatus)
+        {
+            return currentStatus switch
+            {
+                RepeatState.None => RepeatState.All,
+                RepeatState.All => RepeatState.One,
+                RepeatState.One => RepeatState.None,
+                _ => throw new ArgumentOutOfRangeException()
+            };
+        }
+
+
+
 
         public async Task Connect()
         {
             lock (_lock)
             {
-                _ytmApi = new YtmApi(_api, "localhost", "26539");
+                _ytmApi = new YtmApi("localhost", "26539");
                 _ytmApi.OnPlayerStateReceived += (state) =>
                 {
-                    _api.LogDebug("YtmPlugin", "🎵 Now playing: " + state.song?.title);
-                    _api.LogDebug("YtmPlugin", "👤 Artist: " + state.song?.artist);
-                    _api.LogDebug("YtmPlugin", "▶️ Is playing: " + state.isPlaying);
-                    _api.LogDebug("YtmPlugin", "⏱ Position: " + state.position + " sec");
-                    _api.LogDebug("YtmPlugin", "🔁 Repeat: " + state.repeat);
+                    YtmPlugin._logger.Debug("🎵 Now playing: " + CurrentPlaybackName);
+                    YtmPlugin._logger.Debug("👤 Artist: " + state.song?.artist);
+                    YtmPlugin._logger.Debug("▶️ Is playing: " + state.isPlaying);
+                    YtmPlugin._logger.Debug("⏱ Position: " + state.position + " sec");
+                    YtmPlugin._logger.Debug("🔁 Repeat: " + state.repeat);
                 };
                 Task.Run(async () => await _ytmApi.ConnectAsync());
             }
         }
 
-        public PlayerState PlaybackContext
+
+
+        public void Play()
         {
-            get
+            if (!PlaybackContext.isPlaying)
             {
-                return _ytmApi?.PlaybackContext;
+                _ytmApi.ResumePlayback();
             }
         }
 
-        public bool MuteStatus
-        { 
-            get
+        public void Pause()
+        {
+            YtmPlugin._logger.Info($"IsPlaying: {PlaybackContext.isPlaying.ToString()}");
+            if (PlaybackContext.isPlaying)
             {
-                return PlaybackContext?.volume == 0;
+                _ytmApi.PausePlayback();
             }
         }
+
+        public void Skip()
+        {
+            _ytmApi.Skip();
+        }
+
+        public void SkipBack()
+        {
+            _ytmApi.SkipBack();
+        }
+
+        public void SetVolume(int volumePercent = 0)
+        {
+            var currentVolume = CurrentVolume;
+
+            if (currentVolume == volumePercent) return;
+
+            mLastVolume = currentVolume;
+            _ytmApi.SetVolume(volumePercent);
+        }
+
+        public void Shuffle()
+        {
+            _ytmApi.Shuffle();
+        }
+
+        public void ToggleMute()
+        {
+            _ytmApi.Mute();
+        }
+
+        public void ToggleRepeat()
+        {
+            _ytmApi.Repeat();
+        }
+
+        public Task<string> GetArtworkAsync(ResolvedPlayerState state) => GetArtworkAsync(state.song);
+        public Task<string> GetArtworkAsync(ResolvedSongInfo song) => GetArtworkAsync(song.imageSrc, song.videoId);
 
         public Task<string> GetArtworkAsync(PlayerState state) => GetArtworkAsync(state.song);
         public Task<string> GetArtworkAsync(SongInfo song) => GetArtworkAsync(song.imageSrc, song.videoId);
