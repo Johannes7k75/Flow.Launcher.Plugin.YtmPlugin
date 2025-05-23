@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace Flow.Launcher.Plugin.YtmPlugin
 {
-    public class YtmApi
+    public class YtmApi : IDisposable
     {
         private readonly string host;
         private readonly string port;
@@ -16,7 +16,6 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         private readonly CancellationTokenSource cts = new CancellationTokenSource();
 
         public event Action<ResolvedPlayerState> OnPlayerStateReceived;
-
         public event Action<ResolvedSongInfo> OnSongUpdate;
 
         private PlayerState? _latestPlayerState;
@@ -36,6 +35,17 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
             _ = Task.Run(() => ReceiveLoopAsync(cts.Token));
         }
+
+        public async Task DisconnectAsync()
+        {
+            OnPlayerStateReceived = null;
+            OnSongUpdate = null;
+
+            cts.Cancel();
+            if (webSocket.State == WebSocketState.Open)
+                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client closing", CancellationToken.None);
+        }
+
 
         private async Task ReceiveLoopAsync(CancellationToken token)
         {
@@ -137,13 +147,6 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
         }
 
-        public async Task DisconnectAsync()
-        {
-            cts.Cancel();
-            if (webSocket.State == WebSocketState.Open)
-                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client closing", CancellationToken.None);
-        }
-
         public ResolvedPlayerState PlaybackContext => _latestPlayerState.ToResolved();
 
         // Convenience wrapper methods
@@ -174,6 +177,12 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         {
             var bytes = Encoding.UTF8.GetBytes(message);
             await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+
+        public void Dispose()
+        {
+            webSocket?.Dispose();
+            cts?.Dispose();
         }
     }
 

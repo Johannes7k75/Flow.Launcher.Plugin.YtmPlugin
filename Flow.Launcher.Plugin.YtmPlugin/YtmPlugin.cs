@@ -52,10 +52,10 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             _context = context;
             lastQueryTime = DateTime.UtcNow;
 
-            _ = Task.Run(() =>
+            _ = Task.Run(async () =>
             {
                 _client = new YtmPluginClient(_context.CurrentPluginMetadata.PluginDirectory);
-                _client.Connect();
+                await _client.ConnectAsync();
                 _client.AddOnSongUpdate(song => RefreshDisplayInfo());
             });
 
@@ -71,6 +71,10 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             _terms.Add("shuffle", Shuffle);
             _terms.Add("repeat", ToggleRepeat);
 
+            _terms.Add("reconnect", Reconnect);
+
+
+
             return Task.CompletedTask;
         }
         public async Task<List<Result>> QueryAsync(Query query, CancellationToken token)
@@ -79,7 +83,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
             if (!_client.IsConnected)
             {
-                await _client.Connect();
+                await _client.ConnectAsync();
             }
 
             try
@@ -220,94 +224,119 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 _ => "Unknown repeat status"
             };
             return SingleResultInList("Toggle Repeat", $"{toggleAction}: {_client.CurrentPlaybackName}", action: _client.ToggleRepeat);
-        }
         
-        private struct SetVolAction
+
+        public struct BoundedAction<T>
         {
-            public enum VolAction {
+            public enum ActionType
+            {
                 DISPLAY,
                 ABSOLUTE,
-                DECREASE,
-                INCREASE
+                INCREASE,
+                DECREASE
             }
 
-            public VolAction action;
-            public int target;
-            public int current;
-            public bool validAction;
+            public ActionType Action { get; private set; }
+            public T Target { get; private set; }
+            public T Current { get; }
+            public bool IsValid { get; private set; }
 
-            public SetVolAction(string actionString, int current)
+            private readonly T min;
+            private readonly T max;
+            private readonly Func<string, T?> parser;
+            private readonly Func<T, T, T> add;
+            private readonly Func<T, T, T> subtract;
+            private readonly Func<T, T, T> clamp;
+
+            public BoundedAction(string input, T current, T min, T max,
+                Func<string, T?> parser,
+                Func<T, T, T> add,
+                Func<T, T, T> subtract,
+                Func<T, T, T> clamp = null)
             {
-                this.validAction = false;
-                this.target = -1;
-                this.current = current;
+                this.Current = current;
+                this.min = min;
+                this.max = max;
+                this.parser = parser;
+                this.add = add;
+                this.subtract = subtract;
+                this.clamp = clamp ?? ((value, _) => value);  // no clamp by default
 
-                if (string.IsNullOrWhiteSpace(actionString))
-                {
-                    this.action = VolAction.DISPLAY;
+                Action = ActionType.DISPLAY;
+                Target = current;
+                IsValid = false;
+
+                if (string.IsNullOrWhiteSpace(input))
                     return;
-                }
-                
-                string intString = actionString;
-                this.action = VolAction.ABSOLUTE;
-                switch (actionString[0])
+
+                string numericPart = input;
+                Action = ActionType.ABSOLUTE;
+
+                switch (input[0])
                 {
                     case '+':
-                         this.action = VolAction.INCREASE;
-                         intString = actionString.Substring(1);
-                         break;
+                        Action = ActionType.INCREASE;
+                        numericPart = input.Substring(1);
+                        break;
                     case '-':
-                        this.action = VolAction.DECREASE;
-                        intString = actionString.Substring(1);
-                        break;
-
-                    default:
+                        Action = ActionType.DECREASE;
+                        numericPart = input.Substring(1);
                         break;
                 }
 
-                if (int.TryParse(intString, out var amt))
+                var parsed = parser(numericPart);
+                if (parsed != null)
                 {
-                    switch (this.action)
+                    Target = Action switch
                     {
-                        case VolAction.ABSOLUTE:
-                            this.target = amt;
-                            break;
-                        case VolAction.INCREASE:
-                            this.target = this.current + amt;
-                            if (this.target > 100) this.target = 100;
-                            break;
-                        case VolAction.DECREASE:
-                            this.target = this.current - amt;
-                            if (this.target < 0) this.target = 0;
-                        break;
-                    }
+                        ActionType.INCREASE => add(current, parsed),
+                        ActionType.DECREASE => subtract(current, parsed),
+                        _ => parsed
+                    };
 
-                    if (this.target is >= 0 and <= 100)
-                    {
-                        this.validAction = true;
-                        return;
-                    }
+                    if (Comparer<T>.Default.Compare(Target, min) < 0)
+                        Target = min;
+                    if (Comparer<T>.Default.Compare(Target, max) > 0)
+                        Target = max;
+
+                    Target = clamp(Target, current); // optional
+                    IsValid = true;
                 }
-
-                this.action = VolAction.DISPLAY;
             }
         }
+
+
         public List<Result> SetVolume(string arg = null) 
         {
             var cachedVolume = _client.CurrentVolume;
-            SetVolAction volAction = new SetVolAction(arg, cachedVolume);
+            BoundedAction<int> volAction = new(
+                    input: arg, 
+                    current: cachedVolume,
+                    min: 0,
+                    max: 100,
+                    parser: int.Parse,
+                    add: (a,b)=>a+b,
+                    subtract: (a,b)=>a-b
+                    );
 
-            if (volAction.validAction)
+            if (volAction.IsValid)
             {
-                return SingleResultInList($"Set Volume to {volAction.target}", $"Current Volume: {cachedVolume}", action: () =>
+                return SingleResultInList($"Set Volume to {volAction.Target}", $"Current Volume: {cachedVolume}", action: () =>
                 {
-                    _client.SetVolume(volAction.target);
+                    _client.SetVolume(volAction.Target);
                 });
             }
 
             return SingleResultInList("Volume", $"Current Volume: {cachedVolume}", action: () => { });
 
         }
+
+        private List<Result> Reconnect(string arg = null) => SingleResultInList("Reconnect", "Force a reconnection", action: async () =>
+        {
+               await _client.ReconnectAsync();
+                _context.API.ChangeQuery(_context.CurrentPluginMetadata.ActionKeywords[0] + " ", true);
+
+        });
 
         private void RefreshDisplayInfo() => _context.API.ChangeQuery(currentQuery, true);
     }

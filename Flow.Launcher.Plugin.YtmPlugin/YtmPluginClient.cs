@@ -68,7 +68,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         public string CurrentPlaybackName
         {
-            get { return PlaybackContext.song.title != null ? PlaybackContext.song.title : "Unknown"; }
+            get { return PlaybackContext.song.title ?? "Unknown"; }
         }
 
         public ResolvedPlayerState PlaybackContext
@@ -90,7 +90,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
 
 
-        public async Task Connect()
+        public async Task ConnectAsync()
         {
             lock (_lock)
             {
@@ -105,6 +105,22 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 };
                 Task.Run(async () => await _ytmApi.ConnectAsync());
             }
+        }
+
+        public async Task DisconnectAsync()
+        { 
+            await _ytmApi.DisconnectAsync();
+            _ytmApi = null;
+            YtmPlugin._logger.Info("🔌 Disconnected from YTM WebSocket.");
+        }
+
+        public async Task ReconnectAsync()
+        { 
+            if (IsConnected)
+            {
+                await DisconnectAsync();
+            }
+            await ConnectAsync();
         }
 
 
