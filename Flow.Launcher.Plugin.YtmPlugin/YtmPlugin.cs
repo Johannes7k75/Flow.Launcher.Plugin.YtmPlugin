@@ -1,12 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Linq;
-using System.Security.Cryptography.Pkcs;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Media;
-using Flow.Launcher.Plugin;
 
 namespace Flow.Launcher.Plugin.YtmPlugin
 {
@@ -21,7 +19,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         private const string YtmIcon = "icon.png";
 
-        private bool optimizeclientUsage = true;
+        private bool optimizeclientUsage = false;
         private int OptimizeClientKeyDelay = 200;
         private int cachedVolume = -1;
 
@@ -70,6 +68,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             _terms.Add("volume", SetVolume);
             _terms.Add("shuffle", Shuffle);
             _terms.Add("repeat", ToggleRepeat);
+            _terms.Add("seek", SetPosition);
 
             _terms.Add("reconnect", Reconnect);
 
@@ -80,6 +79,8 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         public async Task<List<Result>> QueryAsync(Query query, CancellationToken token)
         {
             currentQuery = query.RawQuery;
+
+            _logger.Info($"Connected: {_client.IsConnected}");
 
             if (!_client.IsConnected)
             {
@@ -174,7 +175,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                     song.title ?? "Not Available",
                     $"{status} | by {song.artist}",
                     icon != null ? icon.Result : YtmIcon,
-                    score: 5
+                    score: 1000
                 ).First(),
                 SingleResultInList(
                     "Pause / Resume",
@@ -196,24 +197,27 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                         RefreshDisplayInfo();
                     },
                     hideAfterAction: false,
-                    requery: true
+                    requery: true,
+                    score: 950
                     ).First(),
                 PlayNext(string.Empty).First(),
                 PlayLast(string.Empty).First(),
                 ToggleMute().First(),
                 Shuffle().First(),
+                SetPosition().First(),
                 ToggleRepeat().First(),
                 SetVolume().First(),
             };
         }
 
-        public List<Result> ToggleMute(string arg = null) 
+        public List<Result> ToggleMute(string arg = null)
         {
             var toggleAction = _client.MuteStatus ? "Unmute" : "Mute";
             return SingleResultInList("Toggle Mute", $"{toggleAction}: {_client.CurrentPlaybackName}", action: _client.ToggleMute);
         }
         public List<Result> Shuffle(string arg = null) => SingleResultInList("Shuffle", "Shuffle queue", action: _client.Shuffle);
-        public List<Result> ToggleRepeat(string arg = null) {
+        public List<Result> ToggleRepeat(string arg = null)
+        {
             var currentRepeatStatus = _client.RepeatStatus;
             var nextRepeatStatus = _client.GetNextRepeatAction(currentRepeatStatus);
             var toggleAction = nextRepeatStatus switch
@@ -224,6 +228,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 _ => "Unknown repeat status"
             };
             return SingleResultInList("Toggle Repeat", $"{toggleAction}: {_client.CurrentPlaybackName}", action: _client.ToggleRepeat);
+        } 
         
 
         public struct BoundedAction<T>
@@ -305,18 +310,75 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             }
         }
 
+        public string SecondsToTime(int value)
+        {
+            int minutes = value / 60;
+            int seconds = value % 60;
+            return $"{minutes}:{seconds}";
+        }
+
+        public List<Result> SetPosition(string arg = null)
+        {
+            int position = _client.PlaybackContext.position;
+            int duration = _client.PlaybackContext.song.songDuration;
+
+            _logger.Info($"Position: {position}, Duration: {duration}");
+
+
+
+            BoundedAction<int> seekAction = new(
+                input: arg,
+                current: position,
+                min: 0,
+                max: duration,
+                parser: (intString) => {
+                    if (intString == null || intString.Length == 0) return 0;
+
+                    if (intString.Contains(':'))
+                    {
+                        var splitted = intString.Split(':');
+
+                        int minutes = int.Parse(splitted[0]);
+                        int seconds = int.Parse(splitted[1]);
+
+                        return minutes * 60 + seconds;
+                    }
+                    else
+                    {
+                        return int.Parse(intString);
+                    }
+                },
+                add: (a, b) => a + b,
+                subtract: (a, b) => a - b,
+                clamp: (val, _) => val
+                );
+            if (seekAction.IsValid)
+            {
+                return SingleResultInList($"Set Volume to {SecondsToTime(seekAction.Target)}", $"Current Position: {SecondsToTime(position)}", action: () =>
+                {
+                    _client.SetPosition(seekAction.Target - position);
+                });
+            }
+
+            return SingleResultInList("Position", $"Current Position: {SecondsToTime(position)}", action: () => { });
+        }
 
         public List<Result> SetVolume(string arg = null) 
         {
             var cachedVolume = _client.CurrentVolume;
+            _logger.Info(arg + " " +cachedVolume);
             BoundedAction<int> volAction = new(
-                    input: arg, 
+                    input: arg,
                     current: cachedVolume,
                     min: 0,
                     max: 100,
-                    parser: int.Parse,
+                    parser: (intString) => {
+                        if (intString == null || intString.Length == 0) return 0;
+                        return int.Parse(intString);
+                    },
                     add: (a,b)=>a+b,
-                    subtract: (a,b)=>a-b
+                    subtract: (a,b)=>a-b,
+                    clamp: (val, _) => val
                     );
 
             if (volAction.IsValid)

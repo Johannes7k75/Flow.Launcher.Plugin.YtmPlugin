@@ -158,6 +158,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         public void Shuffle() => _ = SendSingleActionAsync("shuffle");
         public void Repeat() => _ = SendSingleActionAsync("repeat");
         public void SetVolume(int volumePercent = 0) => _ = SendDataActionAsync("setVolume", volumePercent);
+        public void SetPosition(int songPosition = 0) => _ = SendDataActionAsync("seek", songPosition);
 
         private async Task SendSingleActionAsync(string action)
         {
@@ -206,6 +207,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         public string? imageSrc { get; set; }
         public string? album { get; set; }
         public string? videoId { get; set; }
+        public int? songDuration { get; set; }
 
         [JsonPropertyName("isPaused")]
         public bool isPaused { get; set; }
@@ -233,6 +235,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         public string imageSrc { get; set; } = string.Empty;
         public string album { get; set; } = string.Empty;
         public string videoId { get; set; } = string.Empty;
+        public int songDuration { get; set; } = 0;
         public bool isPaused { get; set; }
         public int elapsedSeconds { get; set; }
     }
@@ -259,6 +262,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                     album = state.song?.album ?? string.Empty,
                     imageSrc = state.song?.imageSrc ?? string.Empty,
                     videoId = state.song?.videoId ?? string.Empty,
+                    songDuration = state.song?.songDuration ?? 0,
                     isPaused = state.song?.isPaused ?? false,
                     elapsedSeconds = state.song?.elapsedSeconds ?? 0
                 }

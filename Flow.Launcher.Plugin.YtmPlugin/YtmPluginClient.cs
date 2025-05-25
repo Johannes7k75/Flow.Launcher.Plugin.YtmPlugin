@@ -162,6 +162,16 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             _ytmApi.SetVolume(volumePercent);
         }
 
+        public void SetPosition(int songPosition = 0)
+        {
+            var currentPosition = PlaybackContext.position;
+
+            if (currentPosition == songPosition) return;
+
+            _ytmApi.SetPosition(songPosition);
+        }
+
+
         public void Shuffle()
         {
             _ytmApi.Shuffle();
@@ -176,6 +186,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         {
             _ytmApi.Repeat();
         }
+
 
         public Task<string> GetArtworkAsync(ResolvedPlayerState state) => GetArtworkAsync(state.song);
         public Task<string> GetArtworkAsync(ResolvedSongInfo song) => GetArtworkAsync(song.imageSrc, song.videoId);
