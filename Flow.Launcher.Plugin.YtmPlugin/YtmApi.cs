@@ -1,24 +1,167 @@
 ﻿using System;
+using System.Linq;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-
 namespace Flow.Launcher.Plugin.YtmPlugin
 {
+    public class PlayerState
+    {
+        public string Type { get; set; } = "";
+        public SongInfo Song { get; set; } = new SongInfo();
+        public bool IsPlaying { get; set; }
+        public bool Muted { get; set; }
+        public int Position { get; set; }
+        public int Volume { get; set; } = 100;
+        public string Repeat { get; set; } = "none";
+    }
+
+    public class SongInfo
+    {
+        public string Title { get; set; } = "";
+        public string Artist { get; set; } = "";
+        public string ImageSrc { get; set; } = "";
+        public string Album { get; set; } = "";
+        public string VideoId { get; set; } = "";
+        public int Duration { get; set; }
+        public bool IsPaused { get; set; }
+        public int ElapsedSeconds { get; set; }
+
+        public string ToString()
+        {
+            return JsonSerializer.Serialize(this);
+        }
+
+    }
+
+    [JsonConverter(typeof(PlayerStateConverter))]
+    public class PlayerStateUpdate
+    {
+        [JsonPropertyName("type")]
+        public string Type { get; set; }
+        [JsonPropertyName("song")]
+        public SongInfoUpdate Song { get; set; }
+        [JsonPropertyName("isPlaying")]
+        public bool? IsPlaying { get; set; }
+        [JsonPropertyName("muted")]
+        public bool? Muted { get; set; }
+        [JsonPropertyName("position")]
+        public int? Position { get; set; }
+        [JsonPropertyName("volume")]
+        public int? Volume { get; set; }
+        [JsonPropertyName("repeat")]
+        public string Repeat { get; set; }
+
+        public string ToString()
+        {
+            return JsonSerializer.Serialize(this);
+        }
+    }
+
+    public class SongInfoUpdate
+    {
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
+        [JsonPropertyName("artist")]
+        public string Artist { get; set; }
+        [JsonPropertyName("imageSrc")]
+        public string ImageSrc { get; set; }
+        [JsonPropertyName("album")]
+        public string Album { get; set; }
+        [JsonPropertyName("videoId")]
+        public string VideoId { get; set; }
+        [JsonPropertyName("songDuration")]
+        public int? Duration { get; set; }
+        [JsonPropertyName("isPaused")]
+        public bool? IsPaused { get; set; }
+        [JsonPropertyName("elapsedSeconds")]
+        public int? ElapsedSeconds { get; set; }
+    }
+
+    public class PlayerStateConverter : JsonConverter<PlayerStateUpdate>
+    {
+        public override PlayerStateUpdate Read(
+            ref Utf8JsonReader reader,
+            Type typeToConvert,
+            JsonSerializerOptions options
+        )
+        {
+            using var doc = JsonDocument.ParseValue(ref reader);
+            var root = doc.RootElement;
+
+            return new PlayerStateUpdate
+            {
+                Type = root.GetProperty("type").GetString(),
+                Song = root.TryGetProperty("song", out var songElement)
+                    ? JsonSerializer.Deserialize<SongInfoUpdate>(songElement.GetRawText(), options)
+                    : null,
+                IsPlaying = root.TryGetProperty("isPlaying", out var playingElement)
+                    ? playingElement.GetBoolean()
+                    : (bool?)null,
+                Muted = root.TryGetProperty("muted", out var mutedElement)
+                    ? mutedElement.GetBoolean()
+                    : (bool?)null,
+                Position = root.TryGetProperty("position", out var positionElement)
+                    ? positionElement.GetInt32()
+                    : (int?)null,
+                Volume = root.TryGetProperty("volume", out var volumeElement)
+                    ? volumeElement.GetInt32()
+                    : (int?)null,
+                Repeat = root.TryGetProperty("repeat", out var repeatElement)
+                    ? repeatElement.GetString()
+                    : null,
+            };
+        }
+
+        public override void Write(Utf8JsonWriter writer, PlayerStateUpdate value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+
+            if (value.Type != null)
+                writer.WriteString("type", value.Type);
+
+            if (value.Song != null)
+            {
+                writer.WritePropertyName("song");
+                JsonSerializer.Serialize(writer, value.Song, options);
+            }
+
+            if (value.IsPlaying.HasValue)
+                writer.WriteBoolean("isPlaying", value.IsPlaying.Value);
+
+            if (value.Muted.HasValue)
+                writer.WriteBoolean("muted", value.Muted.Value);
+
+            if (value.Position.HasValue)
+                writer.WriteNumber("position", value.Position.Value);
+
+            if (value.Volume.HasValue)
+                writer.WriteNumber("volume", value.Volume.Value);
+
+            if (value.Repeat != null)
+                writer.WriteString("repeat", value.Repeat);
+
+            writer.WriteEndObject();
+        }
+    }
+
     public class YtmApi : IDisposable
     {
         private readonly string host;
         private readonly string port;
         private ClientWebSocket webSocket;
-        private readonly CancellationTokenSource cts = new CancellationTokenSource();
+        private CancellationTokenSource cts = new CancellationTokenSource();
+        private readonly object _stateLock = new object(); // Thread-safe state updates
 
-        public event Action<ResolvedPlayerState> OnPlayerStateReceived;
-        public event Action<ResolvedSongInfo> OnSongUpdate;
+        public event Action<PlayerState> OnPlayerStateReceived;
+        public event Action<SongInfo> OnSongUpdate;
 
-        private PlayerState? _latestPlayerState;
+        private Task _receiveTask;
+        private PlayerState _currentState = new PlayerState();
+
 
         public YtmApi(string host, string port)
         {
@@ -30,243 +173,247 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         public async Task ConnectAsync()
         {
             var uri = new Uri($"ws://{host}:{port}");
-            await webSocket.ConnectAsync(uri, CancellationToken.None);
-            YtmPlugin._logger.Info($"✅ Connected to WebSocket server at {uri}");
 
-            _ = Task.Run(() => ReceiveLoopAsync(cts.Token));
+            // Recreate CTS if previously canceled
+            if (cts.IsCancellationRequested)
+            {
+                cts.Dispose();
+                cts = new CancellationTokenSource();
+            }
+
+            try
+            {
+                // Use linked token for connection timeout
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, timeoutCts.Token);
+
+                await webSocket.ConnectAsync(uri, linkedCts.Token);
+            }
+            catch (Exception ex)
+            {
+                YtmPlugin._logger.Info($"⚠️ Connection failed: {ex.Message}");
+                return;
+            }
+
+            if (webSocket.State == WebSocketState.Open)
+            {
+                YtmPlugin._logger.Info($"✅ Connected to WebSocket server at {uri}");
+                _receiveTask = ReceiveLoopAsync(cts.Token);
+            }
         }
+
+        public bool IsConnected => webSocket?.State == WebSocketState.Open;
 
         public async Task DisconnectAsync()
         {
-            OnPlayerStateReceived = null;
-            OnSongUpdate = null;
+            try
+            {
+                // Cancel ongoing operations first
+                cts.Cancel();
 
-            cts.Cancel();
-            if (webSocket.State == WebSocketState.Open)
-                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Client closing", CancellationToken.None);
+                if (webSocket.State == WebSocketState.Open)
+                {
+                    await webSocket.CloseAsync(
+                        WebSocketCloseStatus.NormalClosure,
+                        "Client closing",
+                        CancellationToken.None
+                    );
+                }
+
+                // Wait for receive loop to exit gracefully
+                if (_receiveTask != null && !_receiveTask.IsCompleted)
+                {
+                    await Task.WhenAny(_receiveTask, Task.Delay(1000));
+                }
+            }
+            finally
+            {
+                OnPlayerStateReceived = null;
+                OnSongUpdate = null;
+            }
         }
-
 
         private async Task ReceiveLoopAsync(CancellationToken token)
         {
             var buffer = new byte[4096];
 
-            while (webSocket.State == WebSocketState.Open && !token.IsCancellationRequested)
+            try
             {
-                try
+                while (webSocket.State == WebSocketState.Open && !token.IsCancellationRequested)
                 {
-                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token);
+                    // Process messages
+                    var result = await webSocket.ReceiveAsync(
+                        new ArraySegment<byte>(buffer),
+                        token
+                    );
+
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         YtmPlugin._logger.Info("⚠️ Server closed the connection.");
-                        await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", token);
+                        await webSocket.CloseAsync(
+                            WebSocketCloseStatus.NormalClosure,
+                            "Closing",
+                            token
+                        );
                         break;
                     }
 
                     var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-
-                    var doc = JsonDocument.Parse(json);
-                    if (doc.RootElement.TryGetProperty("type", out var typeElement) &&
-                        typeElement.GetString() == "PLAYER_STATE")
-                    {
-                        var deserializedJson = JsonSerializer.Deserialize<PlayerState>(json);
-                        YtmPlugin._logger.Info(json);
-                        var state = UpdatePlayerState(deserializedJson);
-                        if (state != null)
-                        {
-                            _latestPlayerState = state;               // ✅ store the latest state
-                            OnPlayerStateReceived?.Invoke(state.ToResolved());     // Raise event with resolved state
-                        }
-                    }
+                    ProcessWebSocketMessage(json);
                 }
-                catch (Exception ex)
+            }
+            catch (OperationCanceledException)
+            {
+                YtmPlugin._logger.Info("🔴 WebSocket operation canceled normally");
+            }
+            catch (WebSocketException ex) when (
+                ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely ||
+                ex.WebSocketErrorCode == WebSocketError.InvalidState)
+            {
+                YtmPlugin._logger.Info("🟠 WebSocket connection closed unexpectedly");
+            }
+            catch (Exception ex)
+            {
+                YtmPlugin._logger.Exception($"❌ WebSocket error: {ex.Message}", ex);
+            }
+            finally
+            {
+                // Cleanup resources
+                if (webSocket.State == WebSocketState.Open)
                 {
-                    YtmPlugin._logger.Exception($"❌ Error: {ex.Message}", ex);
-                    break;
+                    try
+                    {
+                        await webSocket.CloseAsync(
+                            WebSocketCloseStatus.NormalClosure,
+                            "Closing connection",
+                            CancellationToken.None
+                        );
+                    }
+                    catch { /* Ignore close errors during shutdown */ }
                 }
             }
         }
 
-        private PlayerState UpdatePlayerState(PlayerState? state)
+        private void ProcessWebSocketMessage(string json)
         {
-            if (state == null)
-                return _latestPlayerState ?? new PlayerState();
-
-            if (_latestPlayerState == null)
-                return state;
-
-            var oldVideoId = _latestPlayerState.song.videoId;
-            var newState = _latestPlayerState;
-
-
-            if (state.song != null)
+            try
             {
-                if (newState.song == null)
-                    newState.song = new SongInfo();
+                if (!json.Contains("\"type\":\"PLAYER_STATE\"")) return;
 
-                // Update fields individually to avoid losing existing data if partial update
-                if (!string.IsNullOrEmpty(state.song.title)) newState.song.title = state.song.title;
-                if (!string.IsNullOrEmpty(state.song.artist)) newState.song.artist = state.song.artist;
-                if (!string.IsNullOrEmpty(state.song.album)) newState.song.album = state.song.album;
-                if (!string.IsNullOrEmpty(state.song.imageSrc)) newState.song.imageSrc = state.song.imageSrc;
-                if (!string.IsNullOrEmpty(state.song.videoId)) newState.song.videoId = state.song.videoId;
+                YtmPlugin._logger.Info($"RawJson: {json}");
 
-                newState.song.isPaused = state.song.isPaused;
-                newState.song.elapsedSeconds = state.song.elapsedSeconds;
+                var update = JsonSerializer.Deserialize<PlayerStateUpdate>(json);
+                YtmPlugin._logger.Info($"DeserializedJson: {update.ToString()}");
 
-                // Keep position synced with song.elapsedSeconds if available
-                newState.position = state.song.elapsedSeconds;
+
+
+                lock (_stateLock)
+                {
+                    UpdatePlayerState(update);
+                }
+            }
+            catch (Exception ex)
+            {
+                YtmPlugin._logger.Exception($"❌ JSON processing error: {ex.Message}", ex);
+            }
+        }
+
+        private void UpdatePlayerState(PlayerStateUpdate update)
+        {
+            YtmPlugin._logger.Info(update + " " + update.ToString());
+
+            if (update == null) return;
+
+            if (update.IsPlaying.HasValue) _currentState.IsPlaying = update.IsPlaying.Value;
+            if (update.Muted.HasValue) _currentState.Muted = update.Muted.Value;
+            if (update.Position.HasValue) _currentState.Position = update.Position.Value;
+            if (update.Volume.HasValue) _currentState.Volume = update.Volume.Value;
+            if (!string.IsNullOrEmpty(update.Repeat)) _currentState.Repeat = update.Repeat;
+            if (!string.IsNullOrEmpty(update.Type)) _currentState.Type = update.Type;
+
+            if (update.Song != null)
+            {
+                var song = update.Song;
+                var currentSong = _currentState.Song;
+                var oldVideoId = currentSong.VideoId;
+
+                if (!string.IsNullOrEmpty(song.Title)) currentSong.Title = song.Title;
+                if (!string.IsNullOrEmpty(song.Artist)) currentSong.Artist = song.Artist;
+                if (!string.IsNullOrEmpty(song.Album)) currentSong.Album = song.Album;
+                if (!string.IsNullOrEmpty(song.ImageSrc)) currentSong.ImageSrc = song.ImageSrc;
+                if (!string.IsNullOrEmpty(song.VideoId)) currentSong.VideoId = song.VideoId;
+                if (song.Duration.HasValue) currentSong.Duration = song.Duration.Value;
+                if (song.IsPaused.HasValue) currentSong.IsPaused = song.IsPaused.Value;
+                if (song.ElapsedSeconds.HasValue) currentSong.ElapsedSeconds = song.ElapsedSeconds.Value;
+
+                YtmPlugin._logger.Info($"New: {currentSong.VideoId}, Old: {oldVideoId}");
+
+                if (currentSong.VideoId != oldVideoId)
+                {
+                    YtmPlugin._logger.Info($"🎵 Song changed: {oldVideoId} → {currentSong.VideoId}");
+                    OnSongUpdate?.Invoke(currentSong);
+                }
             }
 
-            if (state.isPlaying.HasValue) newState.isPlaying = state.isPlaying;
-            if (state.position.HasValue) newState.position = state.position;
-            if (state.volume.HasValue) newState.volume = state.volume;
-            if (state.muted.HasValue) newState.muted = state.muted;
-            if (!string.IsNullOrEmpty(state.repeat)) newState.repeat = state.repeat;
-            if (!string.IsNullOrEmpty(state.type)) newState.type = state.type;
-
-            YtmPlugin._logger.Info($"Old VideoId: {oldVideoId}, New VideoId: {newState.song.videoId}");
-            if (newState.song.videoId != oldVideoId)
-            {
-                YtmPlugin._logger.Info("Song update");
-                OnSongUpdate?.Invoke(newState.ToResolved().song);
-            }
-
-            return newState;
+            OnPlayerStateReceived?.Invoke(_currentState);
         }
 
         public async Task SendActionAsync(string action, object? data = null)
         {
-            if (webSocket.State != WebSocketState.Open) return;
+            if (!IsConnected) return;
 
-            var message = data != null
-                ? JsonSerializer.Serialize(new { type = "ACTION", action, data })
-                : JsonSerializer.Serialize(new { type = "ACTION", action });
+            try
+            {
+                var message = data != null
+                    ? JsonSerializer.Serialize(new { type = "ACTION", action, data })
+                    : JsonSerializer.Serialize(new { type = "ACTION", action });
 
-            var bytes = Encoding.UTF8.GetBytes(message);
-            await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                var bytes = Encoding.UTF8.GetBytes(message);
+                await webSocket.SendAsync(
+                    new ArraySegment<byte>(bytes),
+                    WebSocketMessageType.Text,
+                    true,
+                    cts.Token
+                );
+            }
+            catch (Exception ex)
+            {
+                YtmPlugin._logger.Exception($"❌ Send action failed: {ex.Message}", ex);
+            }
         }
 
-        public ResolvedPlayerState PlaybackContext => _latestPlayerState.ToResolved();
+        // Simplified action methods
+        public Task ResumePlayback() => SendActionAsync("play");
+        public Task PausePlayback() => SendActionAsync("pause");
+        public Task Skip() => SendActionAsync("next");
+        public Task SkipBack() => SendActionAsync("previous");
+        public Task Mute() => SendActionAsync("mute");
+        public Task Shuffle() => SendActionAsync("shuffle");
+        public Task Repeat() => SendActionAsync("repeat");
+        public Task SetVolume(int volumePercent) => SendActionAsync("setVolume", volumePercent);
+        public Task SetPosition(int position) => SendActionAsync("seek", position);
 
-        // Convenience wrapper methods
-        public void ResumePlayback() => _ = SendSingleActionAsync("play");
-        public void PausePlayback() => _ = SendSingleActionAsync("pause");
-        public void Skip() => _ = SendSingleActionAsync("next");
-        public void SkipBack() => _ = SendSingleActionAsync("previous");
-        public void Mute() => _ = SendSingleActionAsync("mute");
-        public void Shuffle() => _ = SendSingleActionAsync("shuffle");
-        public void Repeat() => _ = SendSingleActionAsync("repeat");
-        public void SetVolume(int volumePercent = 0) => _ = SendDataActionAsync("setVolume", volumePercent);
-        public void SetPosition(int songPosition = 0) => _ = SendDataActionAsync("seek", songPosition);
-
-        private async Task SendSingleActionAsync(string action)
+        public PlayerState PlaybackContext
         {
-            if (webSocket.State != WebSocketState.Open) return;
-            var message = JsonSerializer.Serialize(new { type = "ACTION", action });
-            await SendActionAsync(message);
-        }
-
-        private async Task SendDataActionAsync(string action, object data)
-        {
-            if (webSocket.State != WebSocketState.Open) return;
-            var message = JsonSerializer.Serialize(new { type = "ACTION", action, data });
-            await SendActionAsync(message);
-        }
-
-        private async Task SendActionAsync(string message)
-        {
-            var bytes = Encoding.UTF8.GetBytes(message);
-            await webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+            get
+            {
+                lock (_stateLock)
+                {
+                    return _currentState;
+                }
+            }
         }
 
         public void Dispose()
         {
-            webSocket?.Dispose();
-            cts?.Dispose();
-        }
-    }
-
-    // Nullable model used for deserialization and partial updates
-    public class PlayerState
-    {
-        [JsonRequired]
-        public string? type { get; set; }
-        public SongInfo? song { get; set; }
-        public bool? isPlaying { get; set; }
-        public bool? muted { get; set; }
-        public int? position { get; set; }
-        public int? volume { get; set; }
-        public string? repeat { get; set; }
-    }
-
-    public class SongInfo
-    {
-        public string? title { get; set; }
-        public string? artist { get; set; }
-        public string? imageSrc { get; set; }
-        public string? album { get; set; }
-        public string? videoId { get; set; }
-        public int? songDuration { get; set; }
-
-        [JsonPropertyName("isPaused")]
-        public bool isPaused { get; set; }
-
-        [JsonPropertyName("elapsedSeconds")]
-        public int elapsedSeconds { get; set; }
-    }
-
-    // Non-nullable model for safe consumption
-    public class ResolvedPlayerState
-    {
-        public string type { get; set; } = string.Empty;
-        public ResolvedSongInfo song { get; set; } = new ResolvedSongInfo();
-        public bool isPlaying { get; set; }
-        public bool muted { get; set; }
-        public int position { get; set; }
-        public int volume { get; set; }
-        public string repeat { get; set; } = "none";
-    }
-
-    public class ResolvedSongInfo
-    {
-        public string title { get; set; } = string.Empty;
-        public string artist { get; set; } = string.Empty;
-        public string imageSrc { get; set; } = string.Empty;
-        public string album { get; set; } = string.Empty;
-        public string videoId { get; set; } = string.Empty;
-        public int songDuration { get; set; } = 0;
-        public bool isPaused { get; set; }
-        public int elapsedSeconds { get; set; }
-    }
-
-    // Extension method to convert nullable PlayerState to resolved non-nullable
-    public static class PlayerStateExtensions
-    {
-        public static ResolvedPlayerState ToResolved(this PlayerState? state)
-        {
-            state ??= new PlayerState();
-
-            return new ResolvedPlayerState
+            try
             {
-                type = state.type ?? string.Empty,
-                isPlaying = state.isPlaying ?? false,
-                muted = state.muted ?? false,
-                position = state.position ?? 0,
-                volume = state.volume ?? 100,
-                repeat = state.repeat ?? "none",
-                song = new ResolvedSongInfo
-                {
-                    title = state.song?.title ?? string.Empty,
-                    artist = state.song?.artist ?? string.Empty,
-                    album = state.song?.album ?? string.Empty,
-                    imageSrc = state.song?.imageSrc ?? string.Empty,
-                    videoId = state.song?.videoId ?? string.Empty,
-                    songDuration = state.song?.songDuration ?? 0,
-                    isPaused = state.song?.isPaused ?? false,
-                    elapsedSeconds = state.song?.elapsedSeconds ?? 0
-                }
-            };
+                cts?.Cancel();
+                webSocket?.Dispose();
+                cts?.Dispose();
+            }
+            catch { /* Ignore disposal errors */ }
         }
     }
+
 }

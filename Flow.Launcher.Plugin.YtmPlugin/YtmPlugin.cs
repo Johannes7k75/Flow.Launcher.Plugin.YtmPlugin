@@ -53,8 +53,14 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             _ = Task.Run(async () =>
             {
                 _client = new YtmPluginClient(_context.CurrentPluginMetadata.PluginDirectory);
-                await _client.ConnectAsync();
+                try
+                {
+                    await _client.ConnectAsync();
+                    _logger.Info("Conndted to websocket");
+                }
+                catch (Exception ex) { }
                 _client.AddOnSongUpdate(song => RefreshDisplayInfo());
+                _client.AddOnStateUpdate(state => RefreshDisplayInfo());
             });
 
             _logger = new Logger(context.API, this.ToString());
@@ -78,17 +84,35 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         }
         public async Task<List<Result>> QueryAsync(Query query, CancellationToken token)
         {
-            currentQuery = query.RawQuery;
-
-            _logger.Info($"Connected: {_client.IsConnected}");
-
-            if (!_client.IsConnected)
-            {
-                await _client.ConnectAsync();
-            }
-
             try
             {
+                currentQuery = query.RawQuery;
+                _logger.Info("YTM Query");
+
+                if (_client == null || _client.PlaybackContext == null)
+                {
+                    return SingleResultInList("Initializing...", "Connecting to YouTube Music");
+                }
+
+                var playbackContext = _client.PlaybackContext;
+                string contextInfo = playbackContext != null ? playbackContext.ToString() : "No playback data";
+
+                _logger.Info($"Connected: {_client.IsConnected} {contextInfo}");
+
+                if (!_client.IsConnected)
+                {
+                    return SingleResultInList("Not connected - Reconnect",
+                        subtitle: "Flow Launcher is not connected to YouTube Music. Reconnect",
+                        action: () =>
+                        {
+                            Reconnect().First().Action.Invoke(null);
+                            _context.API.ChangeQuery(currentQuery, true);
+                        },
+                        hideAfterAction: false,
+                        requery: true);
+                }
+
+
                 List<Result> results;
 
                 if (string.IsNullOrWhiteSpace(query.Search))
@@ -96,9 +120,9 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                     return GetPlaying();
                 }
 
-                if (_terms.ContainsKey(query.FirstSearch))
+                if (_terms.TryGetValue(query.FirstSearch, out var termHandler))
                 {
-                    return _terms[query.FirstSearch].Invoke(query.SecondToEndSearch);
+                    return termHandler.Invoke(query.SecondToEndSearch);
                 }
 
                 if (optimizeclientUsage)
@@ -106,14 +130,14 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                     await Task.Delay(OptimizeClientKeyDelay, token);
                     if (token.IsCancellationRequested)
                     {
-                        return null;
+                        return new List<Result>();
                     }
                 }
 
-                if (_expensiveTerms.ContainsKey(query.FirstSearch))
+                if (_expensiveTerms.TryGetValue(query.FirstSearch, out var expensiveHandler))
                 {
-                    results = await _expensiveTerms[query.FirstSearch].Invoke(query.SecondToEndSearch);
-                    return results;
+
+                    return await expensiveHandler.Invoke(query.SecondToEndSearch);
                 }
 
                 return GetPlaying();
@@ -121,8 +145,8 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             }
             catch (Exception ex)
             {
-                _logger.Exception(ex.Message, ex);
-                return SingleResultInList("There was an error with your requet", ex.GetBaseException().Message);
+                _logger.Exception($"Query processing error: {ex.Message}", ex);
+                return SingleResultInList("YouTube Music Error", ex.Message);
             }
         }
 
@@ -148,66 +172,80 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         }
 
 
-        private List<Result> Play(string arg) => SingleResultInList("Play", $"Resume: {_client.PlaybackContext.song.title}", action: _client.Play);
-        private List<Result> Pause(string arg = null) => SingleResultInList("Pause", $"Pause: {_client.PlaybackContext.song.title}", action: _client.Pause);
-        private List<Result> PlayNext(string arg) => SingleResultInList("Next", $"Skip: {_client.PlaybackContext.song.title}", action: _client.Skip);
+        private List<Result> Play(string arg) => SingleResultInList("Play", $"Resume: {_client?.PlaybackContext?.Song?.Title}", action: _client.Play);
+        private List<Result> Pause(string arg = null) => SingleResultInList("Pause", $"Pause: {_client?.PlaybackContext?.Song?.Title}", action: _client.Pause);
+        private List<Result> PlayNext(string arg) => SingleResultInList("Next", $"Skip: {_client?.PlaybackContext?.Song?.Title}", action: _client.Skip, hideAfterAction: false, requery: true);
         private List<Result> PlayLast(string arg) => SingleResultInList("Last", $"Skip Backwards", action: _client.SkipBack);
 
         public List<Result> GetPlaying()
         {
+            try
+            {
+                _logger.Info("GetPlaying");
+                var playbackContext = _client?.PlaybackContext;
 
-            _logger.Info("GetPlaying");
-
-            var playbackContext = _client.PlaybackContext;
-
-            var song = playbackContext.song;
-
-            var status = playbackContext.isPlaying ? "Now Playing" : "Paused";
-            var toggleAction = playbackContext.isPlaying ? "Pause" : "Resume";
-
-
-            _logger.Debug(JsonSerializer.Serialize(playbackContext));
-
-            var icon = _client.GetArtworkAsync(song);
-
-            return new List<Result>() {
-                SingleResultInList(
-                    song.title ?? "Not Available",
-                    $"{status} | by {song.artist}",
-                    icon != null ? icon.Result : YtmIcon,
-                    score: 1000
-                ).First(),
-                SingleResultInList(
-                    "Pause / Resume",
-                    $"{toggleAction}: {song.title}",
-                    action: async () =>
-                    {
-                        if (playbackContext.isPlaying)
-                        {
-                            _client.Pause();
-                        }
-                        else
-                        {
-                            _client.Play();
-                        }
-
-                        await Task.Delay(500);
+                if (playbackContext == null || playbackContext?.Song == null)
+                {
+                    return SingleResultInList("No song playing", "Start playback in YouTube Music");
+                }
 
 
-                        RefreshDisplayInfo();
-                    },
-                    hideAfterAction: false,
-                    requery: true,
-                    score: 950
+                var song = playbackContext.Song;
+                var status = playbackContext.IsPlaying ? "Now Playing" : "Paused";
+                var toggleAction = playbackContext.IsPlaying ? "Pause" : "Resume";
+
+
+                _logger.Debug(JsonSerializer.Serialize(playbackContext));
+
+
+                string iconPath = YtmIcon;
+                var artwork = _client.GetArtworkAsync(song);
+                if (!string.IsNullOrEmpty(artwork.Result))
+                {
+                    iconPath = artwork.Result;
+                }
+               
+
+                return new List<Result>() {
+                    SingleResultInList(
+                        title: string.IsNullOrEmpty(song.Title) ? "Not Available" : song.Title,
+                        subtitle: $"{status} {SecondsToTime(_client.PlaybackContext.Position)}/{SecondsToTime(_client.PlaybackContext.Song.Duration)} | by {song.Artist}",
+                        iconPath: iconPath,
+                        score: 1000
                     ).First(),
-                PlayNext(string.Empty).First(),
-                PlayLast(string.Empty).First(),
-                ToggleMute().First(),
-                Shuffle().First(),
-                SetPosition().First(),
-                ToggleRepeat().First(),
-                SetVolume().First(),
-            };
+                    SingleResultInList(
+                        title: "Pause / Resume",
+                        subtitle: $"{toggleAction}: {song.Title}",
+                        action: () =>
+                        {
+                            if (playbackContext.IsPlaying)
+                            {
+                                _client.Pause();
+                            }
+                            else
+                            {
+                                _client.Play();
+                            }
+                        },
+                        hideAfterAction: false,
+                        requery: true,
+                        score: 950
+                    ).First(),
+                    PlayNext(string.Empty).First(),
+                    PlayLast(string.Empty).First(),
+                    ToggleMute().First(),
+                    Shuffle().First(),
+                    SetPosition().First(),
+                    ToggleRepeat().First(),
+                    SetVolume().First(),
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.Exception("Error in GetPlaying", ex);
+                return SingleResultInList("Playback Error", ex.Message);
+
+            }
         }
 
         public List<Result> ToggleMute(string arg = null)
@@ -228,8 +266,8 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 _ => "Unknown repeat status"
             };
             return SingleResultInList("Toggle Repeat", $"{toggleAction}: {_client.CurrentPlaybackName}", action: _client.ToggleRepeat);
-        } 
-        
+        }
+
 
         public struct BoundedAction<T>
         {
@@ -319,8 +357,8 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         public List<Result> SetPosition(string arg = null)
         {
-            int position = _client.PlaybackContext.position;
-            int duration = _client.PlaybackContext.song.songDuration;
+            int position = _client.PlaybackContext.Position;
+            int duration = _client.PlaybackContext.Song.Duration;
 
             _logger.Info($"Position: {position}, Duration: {duration}");
 
@@ -331,13 +369,13 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 current: position,
                 min: 0,
                 max: duration,
-                parser: (intString) => {
+                parser: (intString) =>
+                {
                     if (intString == null || intString.Length == 0) return 0;
 
                     if (intString.Contains(':'))
                     {
                         var splitted = intString.Split(':');
-
                         int minutes = int.Parse(splitted[0]);
                         int seconds = int.Parse(splitted[1]);
 
@@ -363,21 +401,22 @@ namespace Flow.Launcher.Plugin.YtmPlugin
             return SingleResultInList("Position", $"Current Position: {SecondsToTime(position)}", action: () => { });
         }
 
-        public List<Result> SetVolume(string arg = null) 
+        public List<Result> SetVolume(string arg = null)
         {
             var cachedVolume = _client.CurrentVolume;
-            _logger.Info(arg + " " +cachedVolume);
+            _logger.Info(arg + " " + cachedVolume);
             BoundedAction<int> volAction = new(
                     input: arg,
                     current: cachedVolume,
                     min: 0,
                     max: 100,
-                    parser: (intString) => {
+                    parser: (intString) =>
+                    {
                         if (intString == null || intString.Length == 0) return 0;
                         return int.Parse(intString);
                     },
-                    add: (a,b)=>a+b,
-                    subtract: (a,b)=>a-b,
+                    add: (a, b) => a + b,
+                    subtract: (a, b) => a - b,
                     clamp: (val, _) => val
                     );
 
@@ -395,11 +434,15 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         private List<Result> Reconnect(string arg = null) => SingleResultInList("Reconnect", "Force a reconnection", action: async () =>
         {
-               await _client.ReconnectAsync();
-                _context.API.ChangeQuery(_context.CurrentPluginMetadata.ActionKeywords[0] + " ", true);
+            await _client.ReconnectAsync();
+            _context.API.ChangeQuery(_context.CurrentPluginMetadata.ActionKeywords[0] + " ", true);
 
         });
 
-        private void RefreshDisplayInfo() => _context.API.ChangeQuery(currentQuery, true);
+        private void RefreshDisplayInfo()
+        {
+            if (string.IsNullOrEmpty(currentQuery)) return;
+            _context.API.ChangeQuery(currentQuery, true);
+        }
     }
 }

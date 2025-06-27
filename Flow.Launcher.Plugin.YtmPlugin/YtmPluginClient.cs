@@ -27,17 +27,34 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         }
 
 
-        public void AddOnSongUpdate(Action<ResolvedSongInfo> cb)
+        public void AddOnSongUpdate(Action<SongInfo> cb)
         {
             _ytmApi.OnSongUpdate += cb;
         }
 
+        public void AddOnStateUpdate(Action<PlayerState> cb)
+        {
+            _ytmApi.OnPlayerStateReceived += cb;
+        }
 
-        public bool IsConnected => PlaybackContext != null;
+        public bool IsConnected
+        {
+            get
+            {
+                try
+                {
+                    return _ytmApi.IsConnected;
+                } catch
+                {
+                    return false;
+                }
+            }
+        }
+           
 
         public bool MuteStatus
         {
-            get { return PlaybackContext?.muted ?? false; }
+            get { return PlaybackContext.Muted; }
         }
 
         public enum RepeatState
@@ -51,7 +68,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         {
             get
             {
-                return PlaybackContext.repeat switch
+                return PlaybackContext.Repeat switch
                 {
                     "NONE" => RepeatState.None,
                     "ONE" => RepeatState.One,
@@ -63,15 +80,15 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         public int CurrentVolume
         {
-            get { return (int)PlaybackContext.volume; }
+            get { return PlaybackContext.Volume; }
         }
 
         public string CurrentPlaybackName
         {
-            get { return PlaybackContext.song.title ?? "Unknown"; }
+            get { return PlaybackContext.Song.Title ?? "Unknown"; }
         }
 
-        public ResolvedPlayerState PlaybackContext
+        public PlayerState PlaybackContext
         {
             get { return _ytmApi.PlaybackContext; }
         }
@@ -98,11 +115,12 @@ namespace Flow.Launcher.Plugin.YtmPlugin
                 _ytmApi.OnPlayerStateReceived += (state) =>
                 {
                     YtmPlugin._logger.Debug("🎵 Now playing: " + CurrentPlaybackName);
-                    YtmPlugin._logger.Debug("👤 Artist: " + state.song?.artist);
-                    YtmPlugin._logger.Debug("▶️ Is playing: " + state.isPlaying);
-                    YtmPlugin._logger.Debug("⏱ Position: " + state.position + " sec");
-                    YtmPlugin._logger.Debug("🔁 Repeat: " + state.repeat);
+                    YtmPlugin._logger.Debug("👤 Artist: " + state.Song?.Artist);
+                    YtmPlugin._logger.Debug("▶️ Is playing: " + state.IsPlaying);
+                    YtmPlugin._logger.Debug("⏱ Position: " + state.Position + " sec");
+                    YtmPlugin._logger.Debug("🔁 Repeat: " + state.Repeat);
                 };
+
                 Task.Run(async () => await _ytmApi.ConnectAsync());
             }
         }
@@ -127,7 +145,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         public void Play()
         {
-            if (!PlaybackContext.isPlaying)
+            if (!PlaybackContext.IsPlaying)
             {
                 _ytmApi.ResumePlayback();
             }
@@ -135,8 +153,8 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         public void Pause()
         {
-            YtmPlugin._logger.Info($"IsPlaying: {PlaybackContext.isPlaying.ToString()}");
-            if (PlaybackContext.isPlaying)
+            YtmPlugin._logger.Info($"IsPlaying: {PlaybackContext.IsPlaying.ToString()}");
+            if (PlaybackContext.IsPlaying)
             {
                 _ytmApi.PausePlayback();
             }
@@ -164,7 +182,7 @@ namespace Flow.Launcher.Plugin.YtmPlugin
 
         public void SetPosition(int songPosition = 0)
         {
-            var currentPosition = PlaybackContext.position;
+            var currentPosition = PlaybackContext.Position;
 
             if (currentPosition == songPosition) return;
 
@@ -188,19 +206,18 @@ namespace Flow.Launcher.Plugin.YtmPlugin
         }
 
 
-        public Task<string> GetArtworkAsync(ResolvedPlayerState state) => GetArtworkAsync(state.song);
-        public Task<string> GetArtworkAsync(ResolvedSongInfo song) => GetArtworkAsync(song.imageSrc, song.videoId);
-
-        public Task<string> GetArtworkAsync(PlayerState state) => GetArtworkAsync(state.song);
-        public Task<string> GetArtworkAsync(SongInfo song) => GetArtworkAsync(song.imageSrc, song.videoId);
+        public Task<string> GetArtworkAsync(PlayerState state) => GetArtworkAsync(state.Song);
+        public Task<string> GetArtworkAsync(SongInfo song) => GetArtworkAsync(song.ImageSrc, song.VideoId);
 
         private async Task<string> GetArtworkAsync(string url, string uniqueId)
         {
-            return await DownloadImageAaync(uniqueId, url);
+            return await DownloadImageAsync(uniqueId, url);
         }
 
-        private async Task<string> DownloadImageAaync(string uniqueId, string url)
+        private async Task<string> DownloadImageAsync(string uniqueId, string url)
         {
+            if (uniqueId == string.Empty || url == string.Empty) return null;
+
             var path = $@"{CacheFolder}\{uniqueId}.jpg";
 
             if (File.Exists(path))
